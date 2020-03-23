@@ -1,0 +1,12 @@
+{
+  "name": "teste-hospedagem",
+  "version": "1.0.0",
+  "description": "",
+  "main": "testehospedagem.js",
+  "scripts": {
+    "start": "node testehospedagem",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "Thiago Fonseca",
+  "license": "ISC"
+}
