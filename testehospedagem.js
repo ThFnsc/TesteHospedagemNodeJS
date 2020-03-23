@@ -55,6 +55,13 @@ var escapeToHTML = (val) =>
 
 
 http.createServer((req, res) => {
+    res.statusCode = 200;
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+    res.setHeader("Pragma", "no-cache");
+    res.setHeader("Expires", "0");
+    res.setHeader("Content-Type", "text/html");
+
     var ip = req.headers["x-forwarded-for"] || req.socket.remoteAddress;
     var permitido = IPsPermitidos.includes(ip);
     var trusted = permitido && req.headers["x-forwarded-proto"] != "http";
@@ -81,11 +88,8 @@ http.createServer((req, res) => {
         }
         console.log(`Para confiar no IP ${ip} acesse: https://${req.headers.host}/${pendente.code}`);
     }
-    res.statusCode = 200;
-    res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
-    res.setHeader("Pragma", "no-cache");
-    res.setHeader("Expires", "0");
-    res.setHeader("Content-Type", "text/html");
+    if (parsedUrl.path == "/teste")
+        return res.end("OK");
     res.end(`<!DOCTYPE html>
     <html lang="pt">
         <head>
@@ -105,6 +109,10 @@ http.createServer((req, res) => {
                 }
             </style>
             <script>
+                if (window.location.protocol != "https:")
+                    fetch("https://" + window.location.hostname + "/teste").then(res => { if (res.statusText == "OK") window.location.protocol = "https:"; }).catch(err => console.log("HTTPS indisponível")) //Redirecionar para HTTPS se disponível
+                else
+                    console.log("HTTPS OK")
             </script>
         </head>
         <body class="bg-dark text-white">
@@ -196,7 +204,6 @@ http.createServer((req, res) => {
                 </div>
             </div>
             <script src="https://code.jquery.com/jquery-3.3.1.slim.min.js" integrity="sha384-q8i/X+965DzO0rT7abK41JStQIAqVgRVzpbzo5smXKp4YfRvH+8abtTE1Pi6jizo" crossorigin="anonymous"></script>
-            <script src="https://cdnjs.cloudflare.com/aaajax/libs/popper.js/1.14.7/umd/popper.min.js" integrity="sha384-UO2eT0CpHqdSJQ6hJty5KVphtPhzWj9WO1clHTMGa3JDZwrnQq4sF86dIHNDz0W1" crossorigin="anonymous"></script>
             <script src="https://stackpath.bootstrapcdn.com/bootstrap/4.3.1/js/bootstrap.min.js" integrity="sha384-JjSmVgyd0p3pXB1rRibZUAYoIIy6OrQ6VrjIEaFf/nJGzIxFDsf4x0xIM+B07jRM" crossorigin="anonymous"></script>
         </body>
     </html>`);
