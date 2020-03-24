@@ -1,4 +1,5 @@
 const http = require("http");
+const childProcess = require("child_process");
 const url = require('url');
 const os = require("os");
 const fs = require("fs");
@@ -12,9 +13,6 @@ const magnitudeDados = {
     "KB": Math.pow(1024, 1),
     "B": Math.pow(1024, 0),
 };
-
-var permissoesPendentes = [];
-var IPsPermitidos = ["::1"];
 
 /**
  * 
@@ -36,6 +34,10 @@ function ackermann(m, n) {
     return m === 0 ? n + 1 : ackermann(m - 1, n === 0 ? 1 : ackermann(m, n - 1));
 }
 
+function randomBase64(bytes) {
+    return Buffer.from(new Array(bytes).fill(0).map(() => Math.random() * 256)).toString("base64").replace(/\//g, "-").replace(/\+/g, "_")
+}
+
 function benchmark() {
     var start = Date.now();
     ackermann(3, 10);
@@ -53,6 +55,17 @@ var escapeToHTML = (val) =>
         .replace(/"/g, "&quot;")
         .replace(/'/g, "&#039;");
 
+var sessions = [];
+
+/**
+ * 
+ * @param {String} cookies 
+ */
+function parseCookies(cookies) {
+    var parsed = {};
+    (cookies || "").split(";").map(v => v.trim()).forEach(v => parsed[v.split("=")[0]] = v.split("=")[1]);
+    return parsed;
+}
 
 http.createServer((req, res) => {
     res.statusCode = 200;
@@ -62,35 +75,53 @@ http.createServer((req, res) => {
     res.setHeader("Expires", "0");
     res.setHeader("Content-Type", "text/html");
 
+    var protocolo = req.headers["x-forwarded-proto"] || (req.connection.encrypted ? "https" : "http");
     var ip = req.headers["x-forwarded-for"] || req.socket.remoteAddress;
-    var permitido = IPsPermitidos.includes(ip);
-    var trusted = permitido && req.headers["x-forwarded-proto"] != "http";
     var parsedUrl = url.parse(req.url);
 
-    console.log(`${ip} ${req.method} ${req.url}`);
-
-    if (!permitido) {
-        var pendente = permissoesPendentes.find(pendente => pendente.ip == ip);
-        if (pendente && parsedUrl.path.substr(1) == pendente.code && pendente.ip == ip) {
-            IPsPermitidos.push(pendente.ip);
-            permissoesPendentes = permissoesPendentes.filter(el => el != pendente);
+    var cookies = parseCookies(req.headers.cookie);
+    var user;
+    if (cookies.id)
+        user = sessions.find(s => s.id == cookies.id);
+    if (!user) {
+        user = {
+            id: randomBase64(30),
+            confirmCode: randomBase64(30),
+            trusted: false
+        };
+        sessions.push(user);
+        res.setHeader("Set-Cookie", `id=${user.id}; Max-Age=86400; Secure`);
+        console.log(`Para confiar no user de sessão ${user.id} (IP ${ip}) acesse: https://${req.headers.host}/${user.confirmCode}`);
+    }
+    if (!user.trusted)
+        if (parsedUrl.path.substr(1) == user.confirmCode) {
+            user.trusted = true;
             res.writeHead(302, {
                 "Location": "/"
             });
             res.end();
-            return;
-        } else if (!pendente) {
-            pendente = {
-                ip: ip,
-                code: Buffer.from(new Array(60).fill(0).map(() => Math.random() * 256)).toString("base64").replace(/\//g, "-").replace(/\+/g, "_")
-            };
-            permissoesPendentes.push(pendente);
         }
-        console.log(`Para confiar no IP ${ip} acesse: https://${req.headers.host}/${pendente.code}`);
-    }
-    if (parsedUrl.path == "/teste")
-        return res.end("OK");
-    res.end(`<!DOCTYPE html>
+
+    console.log(`ip=${ip} method=${req.method} url=${req.url} user=${user.id}`);
+
+    switch (parsedUrl.path) {
+        case "/teste":
+            return res.end("OK");
+        case "/bash":
+            if (!user.trusted) {
+                res.statusCode = 401;
+                return res.end("Não permitido");
+            }
+            var command = "";
+            req.on("data", chunk => command += chunk);
+            req.on("end", () => {
+                childProcess.exec(command, (err, out, outerr) => {
+                    res.end(out || outerr);
+                });
+            });
+            break;
+        default:
+            res.end(`<!DOCTYPE html>
     <html lang="pt">
         <head>
             <meta charset="utf-8">
@@ -110,7 +141,7 @@ http.createServer((req, res) => {
             </style>
             <script>
                 if (window.location.protocol != "https:")
-                    fetch("https://" + window.location.hostname + "/teste").then(res => { if (res.statusText == "OK") window.location.protocol = "https:"; }).catch(err => console.log("HTTPS indisponível")) //Redirecionar para HTTPS se disponível
+                    fetch("https://" + window.location.host + "/teste").then(res => { if (res.statusText == "OK") window.location.protocol = "https:"; }).catch(err => console.log("HTTPS indisponível")) //Redirecionar para HTTPS se disponível
                 else
                     console.log("HTTPS OK")
             </script>
@@ -132,8 +163,38 @@ http.createServer((req, res) => {
                     <div class="card bg-primary card-list">
                         <div class="card-header">Variáveis de ambiente</div>
                         <div class="card-body text-monospace text-white" >
-                            ${trusted ? "" : "<p>Para ver os valores, acesse via HTTPS e de um IP whitelistado</p>"}
-                            ${Object.entries(process.env).map(([key, value]) => `<div class="mb-3"><span class="badge badge-light key-badge">${escapeToHTML(key)}</span> ${trusted ? escapeToHTML(value) : ""}</div>`).join("\n")}
+                            ${user.trusted ? "" : "<p>Para ver os valores, acesse via HTTPS e de uma sessão de admin</p>"}
+                            ${Object.entries(process.env).map(([key, value]) => `<div class="mb-3"><span class="badge badge-light key-badge">${escapeToHTML(key)}</span> ${user.trusted ? escapeToHTML(value) : ""}</div>`).join("\n")}
+                        </div>
+                    </div>
+
+
+                    <div class="card bg-light text-dark card-list">
+                        <div class="card-header">Executar comando</div>
+                        <div class="card-body" >
+                            ${user.trusted ?
+                    `<textarea readonly class="bg-dark text-light w-100 text-monospace" style="height:40vh;" id="console">[Aguardando comando]</textarea>
+            <input type="text" id="bash" class="form-control text-monospace" placeholder="ls -al">
+            <script>
+                var inputBash=document.getElementById("bash");
+                inputBash.addEventListener("keyup", e=>{
+                    if(e.keyCode==13){
+                        var output = document.getElementById("console");
+                        output.value="[Executando...]";
+                        fetch("/bash", {
+                            body: inputBash.value,
+                            method: "post"
+                        }).then(res=>{
+                            res.text().then(text=> output.value=text);
+                        }).catch(err=>{
+                            output.value="ERRO NO FETCH: "+JSON.stringify(err);
+                        });
+                        inputBash.value="";
+                    }
+                });
+            </script>`
+                    :
+                    `<p>Você não tem permissão para esse recurso no momento</p>`}
                         </div>
                     </div>
 
@@ -145,12 +206,12 @@ http.createServer((req, res) => {
                                 <label>RAM</label>
                                 <ul>
                                     ${
-        function () {
-            var mem = process.memoryUsage();
-            mem["Total OS"] = os.totalmem();
-            mem["Total livre OS"] = os.freemem();
-            return Object.entries(mem).sort(([keyA], [keyB]) => keyA < keyB).map(([key, val]) => `<li>${key}: ${formatarMagnitude(val, magnitudeDados)}</li>`).join("\n");
-        }()}
+                function () {
+                    var mem = process.memoryUsage();
+                    mem["Total OS"] = os.totalmem();
+                    mem["Total livre OS"] = os.freemem();
+                    return Object.entries(mem).sort(([keyA], [keyB]) => keyA < keyB).map(([key, val]) => `<li>${key}: ${formatarMagnitude(val, magnitudeDados)}</li>`).join("\n");
+                }()}
                                 </ul>
                             </li>
                             <li class="list-group-item bg-success">OS: ${os.platform()}</li>
@@ -168,9 +229,11 @@ http.createServer((req, res) => {
 
 
                     <div class="card bg-light text-dark card-list">
-                        <div class="card-header">Seu IP</div>
+                        <div class="card-header">Dados do seu acesso</div>
                         <div class="card-body">
-                            ${ip}
+                            <div>IP: ${ip}</div>
+                            <div>Sessão: ${user.id.substr(0, user.id.length / 2)}[...]</div>
+                            <div>Protocolo: ${protocolo}</div>
                         </div>
                     </div>
 
@@ -179,24 +242,24 @@ http.createServer((req, res) => {
                         <div class="card-header">Conteúdo da node_modules</div>
                         <div class="card-body">
                                     ${
-        function () {
-            var dependencias = [];
-            try {
-                dependencias = Object.keys(JSON.parse(fs.readFileSync("package.json")).dependencies);
-            } catch (e) { }
-            try {
-                return `<ul>${(fs.readdirSync("node_modules").sort((a, b) => dependencias.includes(b) - dependencias.includes(a)).map(pasta => `<li class="${dependencias.includes(pasta) ? "font-weight-bold" : ""}">${pasta}</li>`)).join("\n")}</ul>`;
-            } catch (e) {
-                switch (e.code) {
-                    case "ENOENT":
-                        return "Não existe a pasta node_modules";
-                    case "ENOTDIR":
-                        return "node_modules não é uma pasta";
-                    default:
-                        return JSON.stringify(e);
-                }
-            }
-        }()}
+                function () {
+                    var dependencias = [];
+                    try {
+                        dependencias = Object.keys(JSON.parse(fs.readFileSync("package.json")).dependencies);
+                    } catch (e) { }
+                    try {
+                        return `<ul>${(fs.readdirSync("node_modules").sort((a, b) => dependencias.includes(b) - dependencias.includes(a)).map(pasta => `<li class="${dependencias.includes(pasta) ? "font-weight-bold" : ""}">${pasta}</li>`)).join("\n")}</ul>`;
+                    } catch (e) {
+                        switch (e.code) {
+                            case "ENOENT":
+                                return "Não existe a pasta node_modules";
+                            case "ENOTDIR":
+                                return "node_modules não é uma pasta";
+                            default:
+                                return JSON.stringify(e);
+                        }
+                    }
+                }()}
                         </div>
                     </div>
 
@@ -207,5 +270,6 @@ http.createServer((req, res) => {
             <script src="https://stackpath.bootstrapcdn.com/bootstrap/4.3.1/js/bootstrap.min.js" integrity="sha384-JjSmVgyd0p3pXB1rRibZUAYoIIy6OrQ6VrjIEaFf/nJGzIxFDsf4x0xIM+B07jRM" crossorigin="anonymous"></script>
         </body>
     </html>`);
+    }
 }).listen(port, () =>
     console.log(`Aplicação de teste rodando na porta ${port}`));
