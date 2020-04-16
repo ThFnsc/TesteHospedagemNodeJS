@@ -6,6 +6,26 @@ const fs = require("fs");
 
 const port = process.env.PORT || 3000;
 
+var dados;
+
+function saveDados() {
+    fs.writeFile("testehospedagem.json", JSON.stringify(dados, null, 2), () => { });
+}
+
+function restoreDados() {
+    try {
+        dados = JSON.parse(fs.readFileSync("testehospedagem.json"));
+    } catch (err) {
+        console.error("Não foi possível buscar dados salvos");
+    } finally {
+        if (!dados)
+            dados = { sessions: [] };
+    }
+}
+
+if (process.env.ENVIRONMENT == "dev")
+    console.log("Iniciando em ambiente de desenvolvimento");
+
 const magnitudeDados = {
     "TB": Math.pow(1024, 4),
     "GB": Math.pow(1024, 3),
@@ -55,8 +75,6 @@ var escapeToHTML = (val) =>
         .replace(/"/g, "&quot;")
         .replace(/'/g, "&#039;");
 
-var sessions = [];
-
 /**
  * 
  * @param {String} cookies 
@@ -67,6 +85,7 @@ function parseCookies(cookies) {
     return parsed;
 }
 
+restoreDados();
 http.createServer((req, res) => {
     res.statusCode = 200;
     res.setHeader("Access-Control-Allow-Origin", "*");
@@ -82,17 +101,18 @@ http.createServer((req, res) => {
     var cookies = parseCookies(req.headers.cookie);
     var user;
     if (cookies.id)
-        user = sessions.find(s => s.id == cookies.id);
-    if (!user) {
-        user = {
-            id: randomBase64(30),
-            confirmCode: randomBase64(30),
-            trusted: false
-        };
-        sessions.push(user);
-        res.setHeader("Set-Cookie", `id=${user.id}; Max-Age=86400; Secure`);
-        console.log(`Para confiar no user de sessão ${user.id} (IP ${ip}) acesse: https://${req.headers.host}/${user.confirmCode}`);
-    }
+        user = dados.sessions.find(s => s.id == cookies.id);
+    if (!user)
+        if (process.env.ENVIRONMENT == "dev" || protocolo == "https") {
+            user = {
+                id: randomBase64(30),
+                confirmCode: randomBase64(30),
+                trusted: false
+            };
+            dados.sessions.push(user);
+            res.setHeader("Set-Cookie", `id=${user.id}; Max-Age=604800${process.env.ENVIRONMENT == "dev" ? "" : "; Secure"}`);
+            saveDados();
+        } else user = { trusted: false };
     if (!user.trusted)
         if (parsedUrl.path.substr(1) == user.confirmCode) {
             user.trusted = true;
@@ -100,7 +120,9 @@ http.createServer((req, res) => {
                 "Location": "/"
             });
             res.end();
-        }
+            saveDados();
+        } else
+            console.log(`Para confiar no user de sessão ${user.id} (IP ${ip}) acesse: ${process.env.ENVIRONMENT == "dev" ? "http" : "https"}://${req.headers.host}/${user.confirmCode}`);
 
     console.log(`ip=${ip} method=${req.method} url=${req.url} user=${user.id}`);
 
@@ -115,9 +137,10 @@ http.createServer((req, res) => {
             var command = "";
             req.on("data", chunk => command += chunk);
             req.on("end", () => {
-                childProcess.exec(command, (err, out, outerr) => {
-                    res.end(out || outerr);
-                });
+                console.log(`Executando comando "${command}"`);
+                var child = childProcess.exec(command, (err, out, outerr) => res.end(`${err ? `${err}\n` : ""}\n${out}\n${outerr}`));
+                child.stdout.pipe(process.stdout);
+                child.stderr.pipe(process.stderr);
             });
             break;
         default:
@@ -231,9 +254,9 @@ http.createServer((req, res) => {
                     <div class="card bg-light text-dark card-list">
                         <div class="card-header">Dados do seu acesso</div>
                         <div class="card-body">
-                            <div>IP: ${ip}</div>
-                            <div>Sessão: ${user.id.substr(0, user.id.length / 2)}[...]</div>
-                            <div>Protocolo: ${protocolo}</div>
+                            <p>IP: ${ip}</p>
+                            <p>Protocolo: ${protocolo}</p>
+                            ${user.id ? `<p>Sessão: ${user.id.substr(0, user.id.length / 2)}[...]</p>` : `Não foi possível criar uma sessão pois a página foi carregada inseguramente`}
                         </div>
                     </div>
 
