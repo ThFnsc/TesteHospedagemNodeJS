@@ -28,8 +28,13 @@ Copie o arquivo `testehospedagem.js` para os arquivos da hospedagem
 
 ## Se existir um `package.json`
 
-Substitua temporariamente o comando do script start para `node testehospedagem`.
-Retorne de volta para o comando antigo depois que os testes terminarem
+Inclua no início do script start a seguinte string: `node testehospedagem &&`.
+Então, se um script start tinha esse formato:
+`node index`
+Vai virar:
+`node testehospedagem && node index`
+Para reverter depois, pode ser manualmente ou automaticamente.
+Para remover automaticamente, autentique a sua sessão (veja abaixo) e clique no botão `Terminar teste`. Esse botão vai remover o app de teste, remover o testehospedagem.js e o testehospedagem.json
 
 ## Se não existir um `package.json`
 

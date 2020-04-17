@@ -1,10 +1,52 @@
+/*Essa é uma aplicação de testes NodeJS para testar a funcionalidade de hospedagens.
+
+# Features
+
+- Self-contained (é apenas esse arquivo e não requer nenhum módulo para funcionar)
+- Possível executar comandos diretamente pelo navegador. Alternativa a conectar por SSH (requer autenticação)
+
+# Informações mostradas
+
+- Variáveis de ambiente (requer autenticação para ver os valores)
+- Stats de RAM
+- Nome do OS
+- Benchmark básico de CPU
+- Headers enviados pelo navegador
+- IP que fez o acesso
+- Lista dos módulos instalados na node_modules (se existir) com os módulos principais em negrito (usa o package.json como referência)
+
+# Instalação
+
+Copie o arquivo `testehospedagem.js` para os arquivos da hospedagem
+
+## Se existir um `package.json`
+
+Inclua no início do script start a seguinte string: `node testehospedagem &&`.
+Então, se um script start tinha esse formato:
+`node index`
+Vai virar:
+`node testehospedagem && node index`
+Para reverter depois, pode ser manualmente ou automaticamente.
+Para remover automaticamente, autentique a sua sessão (veja abaixo) e clique no botão `Terminar teste`. Esse botão vai remover o app de teste, remover o testehospedagem.js e o testehospedagem.json
+
+## Se não existir um `package.json`
+
+Pode copiar esse incluído mesmo
+
+# Autenticação
+
+* É necessário usar HTTPS para usar essa feature
+
+Para poder acessar mais features como executar comandos e ver os valores das variáveis de ambiente, é necessário autenticar a sua sessão.
+Cada novo acesso garantirá uma sessão para o navegador. Nos logs da aplicação mostrará essa nova sessão assim como um link que quando acessado autentica essa sessão.
+Se o link for válido, será redirecionado de volta para o root e terá acesso as features
+*/
+
 const http = require("http");
 const childProcess = require("child_process");
 const url = require('url');
 const os = require("os");
 const fs = require("fs");
-
-const port = process.env.PORT || 3000;
 
 var dados;
 
@@ -54,6 +96,10 @@ function ackermann(m, n) {
     return m === 0 ? n + 1 : ackermann(m - 1, n === 0 ? 1 : ackermann(m, n - 1));
 }
 
+/**
+ * 
+ * @param {Number} bytes 
+ */
 function randomBase64(bytes) {
     return Buffer.from(new Array(bytes).fill(0).map(() => Math.random() * 256)).toString("base64").replace(/\//g, "-").replace(/\+/g, "_")
 }
@@ -85,8 +131,78 @@ function parseCookies(cookies) {
     return parsed;
 }
 
+/**
+ * 
+ * @param {Request} req 
+ * @param {Response} res 
+ * @param {Function} gotUserCallback 
+ */
+function getUser(req, res, gotUserCallback) {
+    if (req.cookies.id)
+        req.user = dados.sessions.find(s => s.id == req.cookies.id);
+    if (!req.user)
+        if (process.env.ENVIRONMENT == "dev" || req.protocol == "https") {
+            req.user = {
+                id: randomBase64(30),
+                confirmCode: randomBase64(30),
+                trusted: false
+            };
+            dados.sessions.push(req.user);
+            res.setHeader("Set-Cookie", `id=${req.user.id}; Max-Age=604800${process.env.ENVIRONMENT == "dev" ? "" : "; Secure"}`);
+            saveDados();
+        } else req.user = { trusted: false };
+    if (!req.user.trusted)
+        if (req.parsedUrl.path.substr(1) == req.user.confirmCode) {
+            req.user.trusted = true;
+            res.writeHead(302, {
+                "Location": "/"
+            });
+            res.end();
+            return saveDados();
+        }
+    gotUserCallback();
+}
+
+/**
+ *
+ * @param {Request} req
+ * @param {Response} res
+ */
+function authorized(req, res) {
+    if (req.user.trusted)
+        return true;
+    if (res) {
+        res.statusCode = 401;
+        res.end("Unauthorized");
+    }
+    return false;
+}
+
+/**
+ * 
+ * @param {Boolean} remove 
+ */
+function packageCorreto(remove) {
+    var package = JSON.parse(fs.readFileSync("package.json"));
+    var comandos = package.scripts.start.split("&&").map(comando => comando.trim());
+    if (comandos[0].match(/^node testehospedagem(\.js)?$/)) {
+        if (remove) {
+            package.scripts.start = comandos.slice(1).join(" && ");
+            fs.writeFileSync("package.json", JSON.stringify(package, null, 2));
+            ["testehospedagem.js", "testehospedagem.json"].forEach(fs.unlinkSync);
+        }
+        return true;
+    } else
+        return false;
+}
+
+if (!packageCorreto())
+    console.log("ATENÇÃO!!!\nO script start do package.json NÃO ESTÁ CORRETO PARA ALGUMAS FUNCIONALIDADES DESSA APLICAÇÃO!")
+
 restoreDados();
-http.createServer((req, res) => {
+var server = http.createServer((req, res) => {
+    if (req.url == "/favicon.ico")
+        return res.end();
     res.statusCode = 200;
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
@@ -94,57 +210,60 @@ http.createServer((req, res) => {
     res.setHeader("Expires", "0");
     res.setHeader("Content-Type", "text/html");
 
-    var protocolo = req.headers["x-forwarded-proto"] || (req.connection.encrypted ? "https" : "http");
-    var ip = req.headers["x-forwarded-for"] || req.socket.remoteAddress;
-    var parsedUrl = url.parse(req.url);
+    req.ip = req.headers["x-forwarded-for"] || req.socket.remoteAddress;
+    req.protocol = req.headers["x-forwarded-proto"] || (req.connection.encrypted ? "https" : "http");
+    req.parsedUrl = url.parse(req.url);
+    req.cookies = parseCookies(req.headers.cookie);
+    req.user = getUser(req, res, () => {
+        console.log(`Request:\n${Object.entries({
+            ip: req.ip,
+            method: req.method,
+            url: req.url,
+            user: req.user.id,
+            autenticado: req.user.trusted ? "sim" : `não; ${process.env.ENVIRONMENT == "dev" ? "http" : "https"}://${req.headers.host}/${req.user.confirmCode}`
+        }).map(([key, value]) => `    ${key}=${value}`).join("\n")}\n----------------------------`);
 
-    var cookies = parseCookies(req.headers.cookie);
-    var user;
-    if (cookies.id)
-        user = dados.sessions.find(s => s.id == cookies.id);
-    if (!user)
-        if (process.env.ENVIRONMENT == "dev" || protocolo == "https") {
-            user = {
-                id: randomBase64(30),
-                confirmCode: randomBase64(30),
-                trusted: false
-            };
-            dados.sessions.push(user);
-            res.setHeader("Set-Cookie", `id=${user.id}; Max-Age=604800${process.env.ENVIRONMENT == "dev" ? "" : "; Secure"}`);
-            saveDados();
-        } else user = { trusted: false };
-    if (!user.trusted)
-        if (parsedUrl.path.substr(1) == user.confirmCode) {
-            user.trusted = true;
-            res.writeHead(302, {
-                "Location": "/"
-            });
-            res.end();
-            saveDados();
-        } else
-            console.log(`Para confiar no user de sessão ${user.id} (IP ${ip}) acesse: ${process.env.ENVIRONMENT == "dev" ? "http" : "https"}://${req.headers.host}/${user.confirmCode}`);
+        switch (req.parsedUrl.path) {
+            case "/teste":
+                return res.end("OK");
+            case "/bash":
+                if (authorized(req, res)) {
+                    var command = "";
+                    req.on("data", chunk => command += chunk);
+                    req.on("end", () => {
+                        console.log(`Executando comando "${command}"`);
+                        var child = childProcess.exec(command, (err, out, outerr) => res.end(`${err ? `${err}\n` : ""}\n${out}\n${outerr}`));
+                        child.stdout.pipe(process.stdout);
+                        child.stderr.pipe(process.stderr);
+                    });
+                }
+                break;
+            case "/stop":
+                if (authorized(req, res)) {
+                    console.log("Terminando app de teste");
+                    res.end(() => process.exit(0));
+                }
+                break;
+            case "/delete":
+                if (authorized(req, res)) {
+                    if (packageCorreto(true)) {
+                        console.log("Terminando app de teste e removendo até do package.json");
+                        res.end(() => process.exit(0));
+                    } else {
+                        res.statusCode = 500;
+                        res.end("Package.json incorreto");
+                    }
+                }
+                break;
+            default:
+                res.end(index(req));
+        }
+    });
+}).listen(process.env.PORT || 3000, () =>
+    console.log(`Aplicação de teste rodando na porta ${server.address().port}`));
 
-    console.log(`ip=${ip} method=${req.method} url=${req.url} user=${user.id}`);
-
-    switch (parsedUrl.path) {
-        case "/teste":
-            return res.end("OK");
-        case "/bash":
-            if (!user.trusted) {
-                res.statusCode = 401;
-                return res.end("Não permitido");
-            }
-            var command = "";
-            req.on("data", chunk => command += chunk);
-            req.on("end", () => {
-                console.log(`Executando comando "${command}"`);
-                var child = childProcess.exec(command, (err, out, outerr) => res.end(`${err ? `${err}\n` : ""}\n${out}\n${outerr}`));
-                child.stdout.pipe(process.stdout);
-                child.stderr.pipe(process.stderr);
-            });
-            break;
-        default:
-            res.end(`<!DOCTYPE html>
+function index(req) {
+    return `<!DOCTYPE html>
     <html lang="pt">
         <head>
             <meta charset="utf-8">
@@ -153,7 +272,7 @@ http.createServer((req, res) => {
             <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.3.1/css/bootstrap.min.css" integrity="sha384-ggOyR0iXCbMQv3Xipma34MD+dH/1fQ784/j6cY/iJTQUOhcWr7x9JvoRxT2MZw1T" crossorigin="anonymous">
             <style>
                 .card-list {
-                    max-height: 90vh;
+                    max-height: 50vh;
                     overflow: auto;
                 }
 
@@ -186,18 +305,27 @@ http.createServer((req, res) => {
                     <div class="card bg-primary card-list">
                         <div class="card-header">Variáveis de ambiente</div>
                         <div class="card-body text-monospace text-white" >
-                            ${user.trusted ? "" : "<p>Para ver os valores, acesse via HTTPS e de uma sessão de admin</p>"}
-                            ${Object.entries(process.env).map(([key, value]) => `<div class="mb-3"><span class="badge badge-light key-badge">${escapeToHTML(key)}</span> ${user.trusted ? escapeToHTML(value) : ""}</div>`).join("\n")}
+                            ${req.user.trusted ? "" : "<p>Para ver os valores, acesse via HTTPS e de uma sessão de admin</p>"}
+                            ${Object.entries(process.env).map(([key, value]) => `<div class="mb-3"><span class="badge badge-light key-badge">${escapeToHTML(key)}</span> ${req.user.trusted ? escapeToHTML(value) : ""}</div>`).join("\n")}
                         </div>
                     </div>
 
 
-                    <div class="card bg-light text-dark card-list">
+                    <div class="card bg-light text-dark">
                         <div class="card-header">Executar comando</div>
                         <div class="card-body" >
-                            ${user.trusted ?
-                    `<textarea readonly class="bg-dark text-light w-100 text-monospace" style="height:40vh;" id="console">[Aguardando comando]</textarea>
+                            ${authorized(req) ?
+            `<textarea readonly class="bg-dark text-light w-100 text-monospace" style="height:40vh;" id="console">[Aguardando comando]</textarea>
             <input type="text" id="bash" class="form-control text-monospace" placeholder="ls -al">
+            <div class="mt-4">
+                ${packageCorreto() ?
+                `<button onclick="stopApp()" class="btn btn-success" title="Para esse app e inicia o app principal">Iniciar app</button>
+                    <button onclick="deleteApp()" class="btn btn-danger" title="O app de teste se remove até do package.json e inicia a aplicação principal">Terminar teste</button>`
+                :
+                `<p>O formato do script start do package.json está incorreto. Deve estar no seguinte formato:<br>
+                    node testehospedagem && &lt;comando original&gt;</p>`
+            }
+            </div>
             <script>
                 var inputBash=document.getElementById("bash");
                 inputBash.addEventListener("keyup", e=>{
@@ -215,9 +343,18 @@ http.createServer((req, res) => {
                         inputBash.value="";
                     }
                 });
+
+                function stopApp(){
+                    fetch("/stop").then(()=>setTimeout(()=>window.location.reload(),3000)).catch(alert);
+                }
+
+                function deleteApp(){
+                    if(confirm("Essa ação removerá todos os resquícios desse app de teste. Incluindo a parte do script start que inicia ele.\\nTem certeza que deseja continuar?"))
+                        fetch("/delete").then(()=>setTimeout(()=>window.location.reload(),3000)).catch(alert);
+                }
             </script>`
-                    :
-                    `<p>Você não tem permissão para esse recurso no momento</p>`}
+            :
+            `<p>Você não tem permissão para esse recurso no momento</p>`}
                         </div>
                     </div>
 
@@ -229,12 +366,12 @@ http.createServer((req, res) => {
                                 <label>RAM</label>
                                 <ul>
                                     ${
-                function () {
-                    var mem = process.memoryUsage();
-                    mem["Total OS"] = os.totalmem();
-                    mem["Total livre OS"] = os.freemem();
-                    return Object.entries(mem).sort(([keyA], [keyB]) => keyA < keyB).map(([key, val]) => `<li>${key}: ${formatarMagnitude(val, magnitudeDados)}</li>`).join("\n");
-                }()}
+        function () {
+            var mem = process.memoryUsage();
+            mem["Total OS"] = os.totalmem();
+            mem["Total livre OS"] = os.freemem();
+            return Object.entries(mem).sort(([keyA], [keyB]) => keyA < keyB).map(([key, val]) => `<li>${key}: ${formatarMagnitude(val, magnitudeDados)}</li>`).join("\n");
+        }()}
                                 </ul>
                             </li>
                             <li class="list-group-item bg-success">OS: ${os.platform()}</li>
@@ -254,9 +391,9 @@ http.createServer((req, res) => {
                     <div class="card bg-light text-dark card-list">
                         <div class="card-header">Dados do seu acesso</div>
                         <div class="card-body">
-                            <p>IP: ${ip}</p>
-                            <p>Protocolo: ${protocolo}</p>
-                            ${user.id ? `<p>Sessão: ${user.id.substr(0, user.id.length / 2)}[...]</p>` : `Não foi possível criar uma sessão pois a página foi carregada inseguramente`}
+                            <p>IP: ${req.ip}</p>
+                            <p>Protocolo: ${req.protocol}</p>
+                            ${req.user.id ? `<p>Sessão: ${req.user.id.substr(0, req.user.id.length / 2)}[...]</p>` : `Não foi possível criar uma sessão pois a página foi carregada inseguramente`}
                         </div>
                     </div>
 
@@ -265,34 +402,30 @@ http.createServer((req, res) => {
                         <div class="card-header">Conteúdo da node_modules</div>
                         <div class="card-body">
                                     ${
-                function () {
-                    var dependencias = [];
-                    try {
-                        dependencias = Object.keys(JSON.parse(fs.readFileSync("package.json")).dependencies);
-                    } catch (e) { }
-                    try {
-                        return `<ul>${(fs.readdirSync("node_modules").sort((a, b) => dependencias.includes(b) - dependencias.includes(a)).map(pasta => `<li class="${dependencias.includes(pasta) ? "font-weight-bold" : ""}">${pasta}</li>`)).join("\n")}</ul>`;
-                    } catch (e) {
-                        switch (e.code) {
-                            case "ENOENT":
-                                return "Não existe a pasta node_modules";
-                            case "ENOTDIR":
-                                return "node_modules não é uma pasta";
-                            default:
-                                return JSON.stringify(e);
-                        }
-                    }
-                }()}
+        function () {
+            var dependencias = [];
+            try {
+                dependencias = Object.keys(JSON.parse(fs.readFileSync("package.json")).dependencies);
+            } catch (e) { }
+            try {
+                return `<ul>${(fs.readdirSync("node_modules").sort((a, b) => dependencias.includes(b) - dependencias.includes(a)).map(pasta => `<li class="${dependencias.includes(pasta) ? "font-weight-bold" : ""}">${pasta}</li>`)).join("\n")}</ul>`;
+            } catch (e) {
+                switch (e.code) {
+                    case "ENOENT":
+                        return "Não existe a pasta node_modules";
+                    case "ENOTDIR":
+                        return "node_modules não é uma pasta";
+                    default:
+                        return JSON.stringify(e);
+                }
+            }
+        }()}
                         </div>
                     </div>
-
-
                 </div>
             </div>
             <script src="https://code.jquery.com/jquery-3.3.1.slim.min.js" integrity="sha384-q8i/X+965DzO0rT7abK41JStQIAqVgRVzpbzo5smXKp4YfRvH+8abtTE1Pi6jizo" crossorigin="anonymous"></script>
             <script src="https://stackpath.bootstrapcdn.com/bootstrap/4.3.1/js/bootstrap.min.js" integrity="sha384-JjSmVgyd0p3pXB1rRibZUAYoIIy6OrQ6VrjIEaFf/nJGzIxFDsf4x0xIM+B07jRM" crossorigin="anonymous"></script>
         </body>
-    </html>`);
-    }
-}).listen(port, () =>
-    console.log(`Aplicação de teste rodando na porta ${port}`));
+    </html>`;
+}
